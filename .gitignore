@@ -1,0 +1,7 @@
+node_modules
+*.log
+logs/
+sessions.json
+firebase-cred.json
+.env
+.env.local
