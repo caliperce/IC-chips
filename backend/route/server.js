@@ -106,7 +106,8 @@ const corsOptions = {
 
 const app = express();
 app.use(cors(corsOptions));
-app.use(express.json());
+app.use(express.json({ limit: '200mb' })); // Increase payload limit for base64 images (chip images can be large)
+app.use(express.urlencoded({ limit: '200mb', extended: true }));
 
 // Health check route
 app.get("/", (req, res) => {
@@ -177,8 +178,35 @@ async function processClaudeRequest(sessionId, messageId, userQuery, attachments
     }
 
     // Format message with attachments - pass base64 images to agent
+    // If this is an IC chip scan request (has images but minimal/auto query), use the IC scanning system prompt
+    const isICChipScan = processedAttachments.length > 0 && (
+      !userQuery ||
+      userQuery.trim().toLowerCase() === 'scan' ||
+      userQuery.trim().toLowerCase().startsWith('scan ic') ||
+      userQuery.includes('[IC_CHIP_SCAN]')
+    );
+
     let messageWithAttachments = userQuery;
-    if (processedAttachments.length > 0) {
+    let systemPromptAddition = "";
+
+    if (isICChipScan) {
+      // Replace generic query with IC chip scanning instructions
+      messageWithAttachments = `Analyze the IC chip image(s) and perform top marking verification according to the following procedure:
+
+1. **Extract Text & Logo**: Read all visible text and logos from the chip's top surface
+2. **Identify Brand/MPN**: Determine the manufacturer and part number
+3. **Retrieve OEM Datasheet**: Search for and fetch the official datasheet marking specification from the OEM website (ti.com, onsemi.com, winbond.com, microchip.com, st.com, etc.)
+4. **Compare & Verify**: Match the observed markings against the datasheet specifications
+5. **Generate Verdict**: Provide one of: PASS / FAIL / REVIEW / INDETERMINATE with detailed reasoning
+
+Images to analyze:`;
+
+      processedAttachments.forEach(att => {
+        messageWithAttachments += `\n- ${att.filename}`;
+      });
+
+      systemPromptAddition = `You are an expert IC chip verification agent. Your task is to analyze IC chip top markings and verify their authenticity against OEM datasheets. Always provide citations to the exact datasheet pages used.`;
+    } else if (processedAttachments.length > 0) {
       messageWithAttachments += "\n\nImages:\n";
       processedAttachments.forEach(att => {
         messageWithAttachments += `[Image: ${att.filename}]\n`;
@@ -742,8 +770,8 @@ app.get("/search", async (req, res) => {
 });
 
 // Start server
-const PORT = process.env.PORT || 3001;
-app.listen(8000, () => {
+const PORT = 8000;
+app.listen(PORT, () => {
   console.log(`=� IC Project Backend server running on port ${PORT}`);
   console.log(`=� API endpoints:`);
   console.log(`   GET  /                     - Health check`);

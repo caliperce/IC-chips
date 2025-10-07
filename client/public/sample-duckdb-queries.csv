@@ -1,0 +1,13 @@
+timestamp,step,sql,status,row_count
+2024-09-29T10:15:23.456Z,Initial Data Overview,SELECT COUNT(*) as total_records FROM read_parquet('data/indian/parquet/*.parquet'),success,2847362
+2024-09-29T10:15:45.789Z,Temperature Analysis,SELECT AVG(TEMP) as avg_temp FROM read_parquet('data/indian/parquet/*.parquet') WHERE TEMP IS NOT NULL,success,1
+2024-09-29T10:16:02.123Z,Salinity Range Check,SELECT MIN(PSAL) as min_salinity, MAX(PSAL) as max_salinity FROM read_parquet('data/indian/parquet/*.parquet') WHERE PSAL IS NOT NULL,success,1
+2024-09-29T10:16:18.456Z,Monthly Data Distribution,SELECT YEAR(time) as year, MONTH(time) as month, COUNT(*) as records FROM read_parquet('data/indian/parquet/*.parquet') GROUP BY YEAR(time), MONTH(time) ORDER BY year, month,success,48
+2024-09-29T10:16:34.789Z,High Temperature Locations,SELECT latitude, longitude, TEMP FROM read_parquet('data/indian/parquet/*.parquet') WHERE TEMP > 30 ORDER BY TEMP DESC LIMIT 10,success,10
+2024-09-29T10:16:51.012Z,Depth Profile Analysis,SELECT PRES as depth, AVG(TEMP) as avg_temp, AVG(PSAL) as avg_salinity FROM read_parquet('data/indian/parquet/*.parquet') WHERE PRES BETWEEN 0 AND 100 GROUP BY PRES ORDER BY PRES,success,101
+2024-09-29T10:17:07.345Z,March 2023 Hotspots,SELECT latitude, longitude, TEMP, PSAL FROM read_parquet('data/indian/parquet/2023-03.parquet') WHERE TEMP > 28 AND PSAL > 35,success,234
+2024-09-29T10:17:23.678Z,Seasonal Temperature Trends,SELECT MONTH(time) as month, AVG(TEMP) as avg_temp FROM read_parquet('data/indian/parquet/*.parquet') WHERE YEAR(time) = 2023 GROUP BY MONTH(time) ORDER BY month,success,12
+2024-09-29T10:17:40.901Z,Surface Water Analysis,SELECT AVG(TEMP) as surface_temp, AVG(PSAL) as surface_salinity FROM read_parquet('data/indian/parquet/*.parquet') WHERE PRES < 5,success,1
+2024-09-29T10:17:56.234Z,Data Quality Check,SELECT COUNT(*) as valid_records FROM read_parquet('data/indian/parquet/*.parquet') WHERE TEMP IS NOT NULL AND PSAL IS NOT NULL AND PRES IS NOT NULL,success,1
+2024-09-29T10:18:12.567Z,Geographic Coverage,SELECT MIN(latitude) as min_lat, MAX(latitude) as max_lat, MIN(longitude) as min_lon, MAX(longitude) as max_lon FROM read_parquet('data/indian/parquet/*.parquet'),success,1
+2024-09-29T10:18:28.890Z,Deep Water Properties,SELECT AVG(TEMP) as deep_temp, AVG(PSAL) as deep_salinity FROM read_parquet('data/indian/parquet/*.parquet') WHERE PRES > 1000,success,1

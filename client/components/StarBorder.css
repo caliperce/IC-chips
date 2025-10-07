@@ -1,0 +1,121 @@
+.star-border-container {
+  display: inline-block;
+  position: relative;
+  border-radius: 24px;
+  overflow: hidden;
+}
+
+.border-gradient-bottom {
+  position: absolute;
+  width: 80px;
+  height: 4px;
+  opacity: 0.9;
+  border-radius: 50px;
+  animation: revolve-border linear infinite;
+  z-index: 0;
+  filter: blur(1px);
+  transform-origin: center;
+  box-shadow: 0 0 10px currentColor;
+}
+
+.border-gradient-top {
+  position: absolute;
+  opacity: 0.7;
+  width: 60px;
+  height: 3px;
+  border-radius: 50px;
+  animation: revolve-border-reverse linear infinite;
+  z-index: 0;
+  filter: blur(1px);
+  transform-origin: center;
+  box-shadow: 0 0 8px currentColor;
+}
+
+.inner-content {
+  position: relative;
+  background: rgba(88, 86, 116, 0.4);
+  color: white;
+  border-radius: 20px;
+  z-index: 1;
+  padding: 0;
+  border: 2px solid rgba(114, 102, 156, 0.5);
+  box-shadow: 
+    0 0 0 1px rgba(114, 102, 156, 0.4),
+    0 0 15px rgba(114, 102, 156, 0.3),
+    0 0 25px rgba(114, 102, 156, 0.1),
+    inset 0 0 0 1px rgba(114, 102, 156, 0.2);
+}
+
+@keyframes revolve-border {
+  0% {
+    top: 0;
+    left: 0;
+    transform: rotate(0deg);
+    opacity: 0;
+  }
+  25% {
+    top: 0;
+    right: 0;
+    left: auto;
+    opacity: 1;
+  }
+  50% {
+    top: auto;
+    bottom: 0;
+    right: 0;
+    left: auto;
+    opacity: 1;
+  }
+  75% {
+    top: auto;
+    bottom: 0;
+    right: auto;
+    left: 0;
+    opacity: 1;
+  }
+  100% {
+    top: 0;
+    left: 0;
+    right: auto;
+    bottom: auto;
+    transform: rotate(360deg);
+    opacity: 0;
+  }
+}
+
+@keyframes revolve-border-reverse {
+  0% {
+    top: 0;
+    right: 0;
+    transform: rotate(0deg);
+    opacity: 0;
+  }
+  25% {
+    top: auto;
+    bottom: 0;
+    right: 0;
+    opacity: 1;
+  }
+  50% {
+    top: auto;
+    bottom: 0;
+    right: auto;
+    left: 0;
+    opacity: 1;
+  }
+  75% {
+    top: 0;
+    bottom: auto;
+    right: auto;
+    left: 0;
+    opacity: 1;
+  }
+  100% {
+    top: 0;
+    right: 0;
+    left: auto;
+    bottom: auto;
+    transform: rotate(-360deg);
+    opacity: 0;
+  }
+}
