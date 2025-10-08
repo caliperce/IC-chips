@@ -4,9 +4,6 @@
 @tailwind components;
 @tailwind utilities;
 
-/* React Day Picker styles */
-@import 'react-day-picker/src/style.css';
-
 @layer base {
   :root {
     --background: 0 0% 100%;

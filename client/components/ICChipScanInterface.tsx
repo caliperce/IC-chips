@@ -9,7 +9,7 @@ import { Card, CardContent } from './ui/card';
 import { Badge } from './ui/badge';
 import { db } from '@/lib/firebase';
 import { onSnapshot, doc } from 'firebase/firestore';
-import { FrontendStreamParser } from '@/utils/frontend-stream-parser';
+import { FrontendStreamParser, parseCompleteLog, formatResults } from '../utils/stream-parser';
 import { SessionSidebar } from './SessionSidebar';
 import { getSession } from '@/utils/api';
 
@@ -23,6 +23,7 @@ interface ScanResult {
   citations?: string[];
   error?: string;
   toolsUsed?: Array<{ id: string; name: string }>;
+  toolActivity?: string[]; // Array of tool activity log entries
 }
 
 export function ICChipScanInterface() {
@@ -61,34 +62,19 @@ export function ICChipScanInterface() {
     setIsScanning(true);
 
     try {
-      const imageAttachments = await Promise.all(
-        files.map(async (fileItem) => {
-          const file = fileItem.file as File;
-          return new Promise<{ url: string; type: string; filename: string }>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => {
-              resolve({
-                url: reader.result as string,
-                type: 'image',
-                filename: file.name,
-              });
-            };
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          });
-        })
-      );
+      // Create FormData to upload actual files to R2
+      const formData = new FormData();
+      formData.append('userQuery', 'scan');
+
+      // Add all image files to FormData
+      files.forEach((fileItem) => {
+        const file = fileItem.file as File;
+        formData.append('images', file);
+      });
 
       const response = await fetch('http://localhost:8000/chat', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          userQuery: '[IC_CHIP_SCAN]',
-          ownerUid: 'anonymous',
-          attachments: imageAttachments,
-        }),
+        body: formData, // Send as multipart/form-data (multer will handle it)
       });
 
       if (!response.ok) {
@@ -116,6 +102,7 @@ export function ICChipScanInterface() {
 
   const setupMessageListener = (messageId: string) => {
     const messageRef = doc(db, 'messages', messageId);
+    let lastProcessedLength = 0; // Track how much we've already processed
 
     const parser = new FrontendStreamParser({
       onTextUpdate: (_newText: string, fullText: string) => {
@@ -150,8 +137,11 @@ export function ICChipScanInterface() {
         const messageData = docSnapshot.data();
         const rawStream = messageData.assistantStreaming || '';
 
-        if (rawStream && parser) {
-          parser.processChunk(rawStream);
+        // Only process NEW data (not the entire stream again)
+        if (rawStream && parser && rawStream.length > lastProcessedLength) {
+          const newChunk = rawStream.slice(lastProcessedLength);
+          parser.processChunk(newChunk);
+          lastProcessedLength = rawStream.length;
           const state = parser.getState();
 
           setScanResults(prev =>
@@ -160,11 +150,12 @@ export function ICChipScanInterface() {
                 ? {
                     ...result,
                     status: messageData.status || 'processing',
-                    agentThinking: state.thinking || state.assistantText || result.agentThinking,
+                    agentThinking: state.thinking || result.agentThinking || 'Processing...',
                     assistantText: state.assistantText,
-                    finalAnswer: messageData.assistantResponse || state.assistantText,
+                    finalAnswer: messageData.assistantResponse,
                     error: messageData.error?.message,
                     toolsUsed: state.toolUses,
+                    toolActivity: state.toolActivity, // Add tool activity tracking
                   }
                 : result
             )
@@ -272,6 +263,24 @@ export function ICChipScanInterface() {
                             <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 rounded-sm"></span>
                           )}
                         </pre>
+                        
+                        {/* Tool Activity inside thinking dropdown */}
+                        {result.toolActivity && result.toolActivity.length > 0 && (
+                          <div className="mt-4 pt-4 border-t border-border/50">
+                            <h4 className="text-xs font-semibold mb-2 text-foreground/90 flex items-center gap-2">
+                              🔧 Tool Activity
+                              {result.status === 'processing' && <Loader2 className="h-3 w-3 animate-spin" />}
+                            </h4>
+                            <div className="rounded-md p-3 bg-black/10 dark:bg-black/30">
+                              <pre className="text-xs font-mono leading-relaxed text-foreground/70 whitespace-pre-wrap">
+                                {result.toolActivity.join('\n')}
+                                {result.status === 'processing' && (
+                                  <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 rounded-sm"></span>
+                                )}
+                              </pre>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </motion.div>
                   )}
