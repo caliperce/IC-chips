@@ -230,25 +230,39 @@ export function parseImageReferences(msg: string): { text: string; imagePaths: s
 // MESSAGE CONSTRUCTION HELPERS
 // ============================================================================
 
-export const makeUserMessage = async (msg: string, base64Images: any[] = []) => {
+export const makeUserMessage = async (msg: string, images: any[] = []) => {
   // Parse for image references in text (for backward compatibility)
   const { text, imagePaths } = parseImageReferences(msg);
 
   // Build content array starting with text
   const content: any[] = [{ type: "text" as const, text }];
 
-  // Add images from base64Images parameter (from server.js)
-  if (base64Images && base64Images.length > 0) {
-    for (const img of base64Images) {
-      content.push({
-        type: "image",
-        source: {
-          type: "base64",
-          media_type: img.mediaType || "image/png",
-          data: img.base64
-        }
-      });
-      console.log(`📸 Added base64 image: ${img.filename}`);
+  // Add images from images parameter (from server.js)
+  if (images && images.length > 0) {
+    for (const img of images) {
+      // Check if image has base64 data (old format) or just URL (new format)
+      if (img.base64) {
+        // Base64 format (legacy)
+        content.push({
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: img.mediaType || img.contentType || "image/png",
+            data: img.base64
+          }
+        });
+        console.log(`📸 Added base64 image: ${img.filename}`);
+      } else if (img.url) {
+        // URL format (new - for R2 public URLs)
+        content.push({
+          type: "image",
+          source: {
+            type: "url",
+            url: img.url
+          }
+        });
+        console.log(`📸 Added image URL: ${img.url}`);
+      }
     }
   }
 

@@ -1,95 +1,114 @@
 /**
- * Claude Stream Parser - Handles both real-time streaming and post-processing
+ * Enhanced Frontend-Friendly Claude Stream Parser
+ * Now properly displays tool usage in the output!
  */
 
-import fs from 'fs';
-
-/**
- * Real-time Stream Handler with Structured Output
- * Processes events as they arrive during streaming
- */
-class ClaudeStreamHandler {
+class FrontendStreamParser {
   constructor(callbacks = {}) {
     this.callbacks = {
-      onMetadata: callbacks.onMetadata || (() => {}),
-      onThinking: callbacks.onThinking || (() => {}),
-      onTextDelta: callbacks.onTextDelta || (() => {}),
+      onTextUpdate: callbacks.onTextUpdate || (() => {}),
+      onThinkingUpdate: callbacks.onThinkingUpdate || (() => {}),
+      onToolUse: callbacks.onToolUse || (() => {}),
+      onToolCommand: callbacks.onToolCommand || (() => {}),
+      onToolComplete: callbacks.onToolComplete || (() => {}),
+      onTableDetected: callbacks.onTableDetected || (() => {}),
       onComplete: callbacks.onComplete || (() => {}),
       onError: callbacks.onError || (() => {})
     };
     
     this.state = {
-      metadata: {},
+      metadata: {
+        sessionId: '',
+        messageId: '',
+        model: '',
+        startTime: ''
+      },
       thinking: '',
-      response: '',
-      usage: {},
-      links: [],
-      fragments: [],
+      assistantText: '',
+      toolUses: [],
+      toolCommands: [],
+      fullToolCommand: '',
+      tables: [],
+      chronologicalEvents: [],
+      webSearchActivity: [],  // Raw web search events
+      toolActivity: [],  // All tool activity (WebSearch, WebFetch, etc.)
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0
+      },
       isComplete: false
     };
-    
+
     this.buffer = '';
     this.jsonBuffer = '';
+    this.currentToolInput = '';
+    this.currentToolName = '';
+    this.currentToolId = '';
+    this.isWebSearchActive = false;  // Track if we're in a web search
+    this.isToolActive = false;  // Track if any tool is active
   }
 
-  /**
-   * Process incoming stream chunk (real-time)
-   */
   processChunk(chunk) {
     try {
       this.buffer += chunk;
-      
-      // Try to extract complete JSON events from buffer
       const events = this.extractEvents();
-      
       events.forEach(event => {
         this.handleEvent(event);
       });
-      
     } catch (error) {
       this.callbacks.onError(error);
     }
   }
 
-  /**
-   * Extract complete JSON events from buffer
-   */
   extractEvents() {
     const events = [];
     const lines = this.buffer.split('\n');
     
-    // Keep the last line in buffer if it's incomplete
     this.buffer = lines.pop() || '';
     
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       
-      // Handle multi-line JSON objects
-      if (trimmed.startsWith('[') && trimmed.includes(']')) {
-        // Start of a new event - process any buffered JSON
+      // Look for tool_use_from_stream lines - these are special
+      if (trimmed.includes('tool_use_from_stream:')) {
+        // Process any buffered JSON first
         if (this.jsonBuffer) {
           try {
             const event = JSON.parse(this.jsonBuffer);
             events.push(event);
-          } catch (e) {
-            // Incomplete JSON, continue buffering
-          }
+          } catch (e) {}
           this.jsonBuffer = '';
         }
-        continue; // Skip timestamp lines
+        continue;
+      }
+
+      // Look for input_json_delta lines
+      if (trimmed.includes('input_json_delta:')) {
+        // Get the next line which should have the partial data
+        continue;
       }
       
-      // Check if line contains event type (session_init, stream_event, etc)
-      if (trimmed.match(/^(session_init|stream_event|session_complete):/)) {
-        // Process previous JSON if exists
+      // Skip timestamp lines
+      if (trimmed.startsWith('[') && trimmed.includes(']')) {
         if (this.jsonBuffer) {
           try {
             const event = JSON.parse(this.jsonBuffer);
             events.push(event);
-          } catch (e) {
-            // Skip malformed JSON
-          }
+          } catch (e) {}
+          this.jsonBuffer = '';
+        }
+        continue;
+      }
+      
+      // Skip event type labels
+      if (trimmed.match(/^(session_init|stream_event|tool_use_from_stream):/)) {
+        if (this.jsonBuffer) {
+          try {
+            const event = JSON.parse(this.jsonBuffer);
+            events.push(event);
+          } catch (e) {}
         }
         this.jsonBuffer = '';
         continue;
@@ -98,15 +117,15 @@ class ClaudeStreamHandler {
       // Accumulate JSON lines
       this.jsonBuffer += trimmed;
       
-      // Try to parse if we have complete JSON
+      // Try to parse when we might have complete JSON
       if (trimmed.endsWith('}') || trimmed.endsWith('},')) {
         try {
-          const cleanJson = this.jsonBuffer.replace(/,$/, ''); // Remove trailing comma
+          const cleanJson = this.jsonBuffer.replace(/,$/, '');
           const event = JSON.parse(cleanJson);
           events.push(event);
           this.jsonBuffer = '';
         } catch (e) {
-          // Continue buffering, JSON might not be complete
+          // Not complete yet
         }
       }
     }
@@ -114,102 +133,279 @@ class ClaudeStreamHandler {
     return events;
   }
 
-  /**
-   * Handle individual stream event
-   */
   handleEvent(event) {
-    // Session initialization
+    // Session info
     if (event.session_id) {
       this.state.metadata.sessionId = event.session_id;
       this.state.metadata.model = event.model;
-      this.callbacks.onMetadata(this.state.metadata);
     }
 
     // Message start
     if (event.type === 'message_start' && event.message) {
       this.state.metadata.messageId = event.message.id;
-      this.state.metadata.model = event.message.model;
-      
       if (event.message.usage) {
         this.updateUsage(event.message.usage);
       }
-      
-      this.callbacks.onMetadata(this.state.metadata);
     }
 
-    // Content block start
-    if (event.type === 'content_block_start' && event.content_block) {
-      if (event.content_block.type === 'thinking') {
-        // Extended thinking started
-      }
-    }
-
-    // Content block delta (text or thinking)
+    // Text delta
     if (event.type === 'content_block_delta' && event.delta) {
       if (event.delta.type === 'text_delta') {
         const text = this.unescapeText(event.delta.text);
-        this.state.response += text;
-        this.state.fragments.push(text);
+        this.state.assistantText += text;
         
-        // Extract links from this fragment
-        this.extractLinksFromText(text);
+        this.state.chronologicalEvents.push({
+          type: 'text',
+          content: text,
+          timestamp: new Date().toISOString()
+        });
         
-        this.callbacks.onTextDelta(text, this.state.response);
-      } else if (event.delta.type === 'thinking_delta') {
-        const thinking = this.unescapeText(event.delta.thinking);
-        this.state.thinking += thinking;
-        this.callbacks.onThinking(thinking, this.state.thinking);
-      }
-    }
-
-    // Message delta (stop reason, usage update)
-    if (event.type === 'message_delta') {
-      if (event.delta && event.delta.stop_reason) {
-        this.state.metadata.stopReason = event.delta.stop_reason;
+        this.detectAndParseTables();
+        this.callbacks.onTextUpdate(text, this.state.assistantText);
       }
       
-      if (event.usage) {
-        this.updateUsage(event.usage);
+      // Thinking delta
+      if (event.delta.type === 'thinking_delta') {
+        const thinking = this.unescapeText(event.delta.thinking);
+        this.state.thinking += thinking;
+        
+        this.state.chronologicalEvents.push({
+          type: 'thinking',
+          content: thinking,
+          timestamp: new Date().toISOString()
+        });
+        
+        this.callbacks.onThinkingUpdate(thinking, this.state.thinking);
+      }
+      
+      // Input JSON delta - Tool parameters being built
+      if (event.delta.type === 'input_json_delta') {
+        const command = this.unescapeText(event.delta.partial_json);
+        this.currentToolInput += command;
+        this.state.toolCommands.push(command);
+        this.state.fullToolCommand += command;
+
+        // Track ALL tool activity in toolActivity array
+        if (this.isToolActive && this.currentToolName) {
+          // Try to extract meaningful parameters
+          const queryMatch = this.currentToolInput.match(/"query":\s*"([^"]+)"/);
+          const urlMatch = this.currentToolInput.match(/"url":\s*"([^"]+)"/);
+          const promptMatch = this.currentToolInput.match(/"prompt":\s*"([^"]+)"/);
+
+          if (queryMatch) {
+            const lastActivity = this.state.toolActivity[this.state.toolActivity.length - 1];
+            if (!lastActivity || !lastActivity.includes('Query:')) {
+              this.state.toolActivity.push(`  → Query: "${queryMatch[1]}"`);
+            }
+          }
+
+          if (urlMatch) {
+            const lastActivity = this.state.toolActivity[this.state.toolActivity.length - 1];
+            if (!lastActivity || !lastActivity.includes('URL:')) {
+              this.state.toolActivity.push(`  → URL: ${urlMatch[1]}`);
+            }
+          }
+
+          if (promptMatch) {
+            const lastActivity = this.state.toolActivity[this.state.toolActivity.length - 1];
+            if (!lastActivity || !lastActivity.includes('Prompt:')) {
+              const truncatedPrompt = promptMatch[1].length > 100 ?
+                promptMatch[1].substring(0, 100) + '...' : promptMatch[1];
+              this.state.toolActivity.push(`  → Prompt: "${truncatedPrompt}"`);
+            }
+          }
+        }
+
+        // If web search, push raw activity (keep original logic for backward compatibility)
+        if (this.isWebSearchActive) {
+          // Push every chunk as raw activity to show "something happening"
+          // Try to extract query/search_term from accumulated input
+          const potentialMatch = this.currentToolInput.match(/"(search_term|query)":\s*"([^"]+)"/);
+          if (potentialMatch && command.includes('"')) {
+            // Only show the search query once when we detect it's complete enough
+            const lastActivity = this.state.webSearchActivity[this.state.webSearchActivity.length - 1];
+            if (!lastActivity || !lastActivity.includes('Searching for:')) {
+              this.state.webSearchActivity.push(`  → Searching for: "${potentialMatch[2]}"`);
+            }
+          } else {
+            // Show raw activity chunks to indicate processing
+            const cleanChunk = command.replace(/[\r\n]+/g, ' ').substring(0, 50);
+            if (cleanChunk.trim().length > 0) {
+              this.state.webSearchActivity.push(`  ⚡ Processing: ${cleanChunk}...`);
+            }
+          }
+        }
+
+        this.state.chronologicalEvents.push({
+          type: 'tool_command',
+          content: command,
+          timestamp: new Date().toISOString()
+        });
+
+        this.callbacks.onToolCommand(command, this.state.fullToolCommand);
       }
     }
 
-    // Message stop (completion)
+    // Tool use start
+    if (event.type === 'content_block_start' && event.content_block) {
+      if (event.content_block.type === 'tool_use') {
+        this.currentToolId = event.content_block.id;
+        this.currentToolName = event.content_block.name;
+        this.currentToolInput = '';
+
+        // Check if this is a web search tool
+        this.isWebSearchActive = (this.currentToolName === 'WebSearch' || this.currentToolName === 'web_search');
+        this.isToolActive = true;
+
+        const toolInfo = {
+          id: this.currentToolId,
+          name: this.currentToolName,
+          input: null
+        };
+
+        this.state.toolUses.push(toolInfo);
+
+        this.state.chronologicalEvents.push({
+          type: 'tool_use',
+          content: toolInfo,
+          timestamp: new Date().toISOString()
+        });
+
+        // Add tool start to activity log
+        const toolEmoji = this.currentToolName === 'WebSearch' ? '🔍' :
+                         this.currentToolName === 'WebFetch' ? '📄' : '🔧';
+        this.state.toolActivity.push(`${toolEmoji} Starting ${this.currentToolName}...`);
+
+        // If web search, add to web search specific activity log
+        if (this.isWebSearchActive) {
+          this.state.webSearchActivity.push(`🔍 Starting web search...`);
+        }
+
+        this.callbacks.onToolUse(toolInfo);
+      }
+    }
+
+    // Tool use complete
+    if (event.type === 'content_block_stop') {
+      if (this.currentToolInput && this.state.toolUses.length > 0) {
+        const lastTool = this.state.toolUses[this.state.toolUses.length - 1];
+        try {
+          lastTool.input = JSON.parse(this.currentToolInput);
+        } catch (e) {
+          lastTool.input = this.currentToolInput;
+        }
+
+        this.state.chronologicalEvents.push({
+          type: 'tool_complete',
+          content: lastTool,
+          timestamp: new Date().toISOString()
+        });
+
+        this.callbacks.onToolComplete(lastTool);
+
+        // Add completion message to tool activity
+        if (this.isToolActive) {
+          const toolEmoji = this.currentToolName === 'WebSearch' ? '✅' :
+                           this.currentToolName === 'WebFetch' ? '✅' : '✅';
+          this.state.toolActivity.push(`${toolEmoji} ${this.currentToolName} completed\n`);
+        }
+
+        // If web search just completed, add completion message
+        if (this.isWebSearchActive) {
+          this.state.webSearchActivity.push(`✅ Web search completed`);
+          this.isWebSearchActive = false;
+        }
+
+        // Reset current tool tracking
+        this.currentToolInput = '';
+        this.currentToolName = '';
+        this.currentToolId = '';
+        this.isToolActive = false;
+      }
+    }
+
+    // Usage updates
+    if (event.type === 'message_delta' && event.usage) {
+      this.updateUsage(event.usage);
+    }
+
+    // Stream complete
     if (event.type === 'message_stop') {
       this.state.isComplete = true;
-      this.callbacks.onComplete(this.state);
+      this.callbacks.onComplete(this.getState());
     }
   }
 
-  /**
-   * Update usage statistics
-   */
+  detectAndParseTables() {
+    const tableRegex = /(\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)+)/g;
+    const matches = [...this.state.assistantText.matchAll(tableRegex)];
+    
+    if (matches.length > this.state.tables.length) {
+      for (let i = this.state.tables.length; i < matches.length; i++) {
+        const rawTable = matches[i][1];
+        const parsedTable = this.parseMarkdownTable(rawTable);
+        
+        if (parsedTable) {
+          this.state.tables.push(parsedTable);
+          
+          this.state.chronologicalEvents.push({
+            type: 'table',
+            content: parsedTable,
+            timestamp: new Date().toISOString()
+          });
+          
+          this.callbacks.onTableDetected(parsedTable, this.state.tables);
+        }
+      }
+    }
+  }
+
+  parseMarkdownTable(tableText) {
+    try {
+      const lines = tableText.trim().split('\n').filter(line => line.trim());
+      
+      if (lines.length < 3) return null;
+      
+      const headers = lines[0]
+        .split('|')
+        .filter(cell => cell.trim())
+        .map(cell => cell.trim());
+      
+      const rows = [];
+      for (let i = 2; i < lines.length; i++) {
+        const row = lines[i]
+          .split('|')
+          .filter(cell => cell.trim())
+          .map(cell => cell.trim());
+        
+        if (row.length > 0) {
+          rows.push(row);
+        }
+      }
+      
+      return {
+        headers,
+        rows,
+        rowCount: rows.length,
+        columnCount: headers.length,
+        rawText: tableText
+      };
+    } catch (error) {
+      return null;
+    }
+  }
+
   updateUsage(usage) {
     this.state.usage = {
       inputTokens: usage.input_tokens || this.state.usage.inputTokens || 0,
       outputTokens: usage.output_tokens || this.state.usage.outputTokens || 0,
-      cacheCreationTokens: usage.cache_creation_input_tokens || this.state.usage.cacheCreationTokens || 0,
-      cacheReadTokens: usage.cache_read_input_tokens || this.state.usage.cacheReadTokens || 0
+      cacheReadTokens: usage.cache_read_input_tokens || 0
     };
     
     this.state.usage.totalTokens = 
       this.state.usage.inputTokens + this.state.usage.outputTokens;
   }
 
-  /**
-   * Extract links from text fragment
-   */
-  extractLinksFromText(text) {
-    const urlRegex = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/g;
-    let match;
-    
-    while ((match = urlRegex.exec(text)) !== null) {
-      this.state.links.push(match[1]);
-    }
-  }
-
-  /**
-   * Unescape JSON text
-   */
   unescapeText(text) {
     if (!text) return '';
     
@@ -219,351 +415,269 @@ class ClaudeStreamHandler {
       .replace(/\\t/g, '\t')
       .replace(/\\r/g, '\r')
       .replace(/\\\//g, '/')
-      .replace(/\\b/g, '\b')
-      .replace(/\\f/g, '\f')
-      .replace(/\\u([0-9a-fA-F]{4})/g, (match, hex) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/\\u([0-9a-fA-F]{4})/g, (match, hex) => 
+        String.fromCharCode(parseInt(hex, 16)))
       .replace(/\\\\/g, '\\');
   }
 
-  /**
-   * Get current state
-   */
   getState() {
-    return { ...this.state };
+    return {
+      ...this.state,
+      stats: {
+        textLength: this.state.assistantText.length,
+        thinkingLength: this.state.thinking.length,
+        wordCount: this.state.assistantText.split(/\s+/).filter(w => w).length,
+        toolCount: this.state.toolUses.length,
+        commandParts: this.state.toolCommands.length,
+        totalEvents: this.state.chronologicalEvents.length
+      }
+    };
   }
 
   /**
-   * Reset handler
+   * Get formatted output with tool usage included
    */
+  getFormattedOutput() {
+    let output = this.state.assistantText;
+
+    // Add COMPLETE tool activity log (includes ALL tools: WebSearch, WebFetch, etc.)
+    if (this.state.toolActivity.length > 0) {
+      output += '\n\n---\n### 🔧 Tool Activity Log:\n';
+      output += '```\n';
+      this.state.toolActivity.forEach((activity) => {
+        output += `${activity}\n`;
+      });
+      output += '```\n';
+    }
+
+    // Add web search activity if any (legacy - kept for backward compatibility)
+    if (this.state.webSearchActivity.length > 0) {
+      output += '\n\n---\n### 🌐 Web Search Activity (Detailed):\n';
+      output += '```\n';
+      this.state.webSearchActivity.forEach((activity) => {
+        output += `${activity}\n`;
+      });
+      output += '```\n';
+    }
+
+    // Add tool usage summary at the end with full details
+    if (this.state.toolUses.length > 0) {
+      output += '\n\n---\n### 📋 Tools Summary:\n';
+      this.state.toolUses.forEach((tool, idx) => {
+        output += `\n**${idx + 1}. ${tool.name}** (ID: ${tool.id})\n`;
+        if (tool.input) {
+          if (tool.input.query) {
+            output += `   - Query: "${tool.input.query}"\n`;
+          }
+          if (tool.input.url) {
+            output += `   - URL: ${tool.input.url}\n`;
+          }
+          if (tool.input.prompt) {
+            const truncated = tool.input.prompt.length > 150 ?
+              tool.input.prompt.substring(0, 150) + '...' : tool.input.prompt;
+            output += `   - Prompt: "${truncated}"\n`;
+          }
+        }
+      });
+    }
+
+    return output;
+  }
+
   reset() {
     this.state = {
       metadata: {},
       thinking: '',
-      response: '',
+      assistantText: '',
+      toolUses: [],
+      toolCommands: [],
+      fullToolCommand: '',
+      tables: [],
+      chronologicalEvents: [],
+      webSearchActivity: [],
+      toolActivity: [],
       usage: {},
-      links: [],
-      fragments: [],
       isComplete: false
     };
     this.buffer = '';
     this.jsonBuffer = '';
+    this.currentToolInput = '';
+    this.currentToolName = '';
+    this.currentToolId = '';
+    this.isWebSearchActive = false;
+    this.isToolActive = false;
   }
 }
 
 /**
- * Post-processing Parser (for complete logs)
- * Processes entire log after streaming is finished
+ * Enhanced parseCompleteLog function that properly extracts tool usage
  */
-class ClaudeStreamParser {
-  constructor(logText) {
-    this.logText = logText;
-    this.parsed = {
-      metadata: {},
-      thinking: [],
-      response: '',
-      fragments: [],
-      usage: {},
-      links: [],
-      timestamps: []
-    };
-  }
-
-  parse() {
-    this.extractMetadata();
-    this.extractThinking();
-    this.extractResponse();
-    this.extractUsage();
-    this.extractTimestamps();
-    return this.parsed;
-  }
-
-  extractMetadata() {
-    const sessionMatch = this.logText.match(/"session_id":\s*"([^"]+)"/);
-    if (sessionMatch) this.parsed.metadata.sessionId = sessionMatch[1];
-
-    const modelMatch = this.logText.match(/"model":\s*"([^"]+)"/);
-    if (modelMatch) this.parsed.metadata.model = modelMatch[1];
-
-    const startTimeMatch = this.logText.match(/started\s+([\d-T:.Z]+)\)/);
-    if (startTimeMatch) this.parsed.metadata.startTime = startTimeMatch[1];
-
-    const messageIdMatch = this.logText.match(/"id":\s*"(msg_[^"]+)"/);
-    if (messageIdMatch) this.parsed.metadata.messageId = messageIdMatch[1];
-
-    const stopReasonMatch = this.logText.match(/"stop_reason":\s*"([^"]+)"/);
-    if (stopReasonMatch) this.parsed.metadata.stopReason = stopReasonMatch[1];
-
-    const permissionMatch = this.logText.match(/"permission_mode":\s*"([^"]+)"/);
-    if (permissionMatch) this.parsed.metadata.permissionMode = permissionMatch[1];
-  }
-
-  extractThinking() {
-    const thinkingBlockRegex = /"type":\s*"thinking"[\s\S]*?"text":\s*"((?:[^"\\]|\\.)*)"/g;
-    let match;
+function parseCompleteLog(logText) {
+  const parser = new FrontendStreamParser();
+  
+  // Split the log into chunks and process them
+  const chunks = logText.split('\n');
+  let currentChunk = '';
+  
+  for (const line of chunks) {
+    currentChunk += line + '\n';
     
-    while ((match = thinkingBlockRegex.exec(this.logText)) !== null) {
-      this.parsed.thinking.push(this.unescapeText(match[1]));
-    }
-
-    const thinkingDeltaRegex = /"type":\s*"thinking_delta"[\s\S]*?"thinking":\s*"((?:[^"\\]|\\.)*)"/g;
-    
-    while ((match = thinkingDeltaRegex.exec(this.logText)) !== null) {
-      this.parsed.thinking.push(this.unescapeText(match[1]));
+    // Process chunks at logical boundaries
+    if (line.includes('stream_event') || line.includes('tool_use_from_stream') || line.includes('session_complete')) {
+      parser.processChunk(currentChunk);
+      currentChunk = '';
     }
   }
-
-  extractResponse() {
-    const textDeltaRegex = /"type":\s*"text_delta"[^}]*"text":\s*"((?:[^"\\]|\\.)*)"/g;
-    let match;
-    let fullText = '';
-    
-    while ((match = textDeltaRegex.exec(this.logText)) !== null) {
-      const fragment = this.unescapeText(match[1]);
-      fullText += fragment;
-      this.parsed.fragments.push({
-        text: fragment,
-        raw: match[1]
-      });
-    }
-    
-    this.parsed.response = fullText;
-    this.extractLinks();
+  
+  // Process any remaining chunk
+  if (currentChunk) {
+    parser.processChunk(currentChunk);
   }
+  
+  // Return the parsed state with formatted output
+  const state = parser.getState();
+  return {
+    ...state,
+    formattedOutput: parser.getFormattedOutput()
+  };
+}
 
-  extractLinks() {
-    const urlRegex = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/g;
-    let match;
-    
-    while ((match = urlRegex.exec(this.parsed.response)) !== null) {
-      this.parsed.links.push({
-        url: match[1],
-        position: match.index
-      });
-    }
+/**
+ * Format the results in a nice, readable way with tool usage
+ */
+function formatResults(parsedData) {
+  // If we have formattedOutput, just return that
+  if (parsedData.formattedOutput) {
+    return parsedData.formattedOutput;
   }
-
-  extractUsage() {
-    const usageBlocks = [];
-    const usageRegex = /"usage":\s*\{([^}]+)\}/g;
-    let match;
-    
-    while ((match = usageRegex.exec(this.logText)) !== null) {
-      usageBlocks.push(match[1]);
-    }
-    
-    if (usageBlocks.length > 0) {
-      const lastUsage = usageBlocks[usageBlocks.length - 1];
-      
-      const inputMatch = lastUsage.match(/"input_tokens":\s*(\d+)/);
-      if (inputMatch) this.parsed.usage.inputTokens = parseInt(inputMatch[1]);
-      
-      const outputMatch = lastUsage.match(/"output_tokens":\s*(\d+)/);
-      if (outputMatch) this.parsed.usage.outputTokens = parseInt(outputMatch[1]);
-      
-      const cacheCreationMatch = lastUsage.match(/"cache_creation_input_tokens":\s*(\d+)/);
-      if (cacheCreationMatch) this.parsed.usage.cacheCreationTokens = parseInt(cacheCreationMatch[1]);
-      
-      const cacheReadMatch = lastUsage.match(/"cache_read_input_tokens":\s*(\d+)/);
-      if (cacheReadMatch) this.parsed.usage.cacheReadTokens = parseInt(cacheReadMatch[1]);
-      
-      this.parsed.usage.totalTokens = 
-        (this.parsed.usage.inputTokens || 0) + 
-        (this.parsed.usage.outputTokens || 0);
-    }
+  
+  // Otherwise format manually
+  const lines = [];
+  
+  // Add the main assistant text
+  if (parsedData.assistantText) {
+    lines.push(parsedData.assistantText);
   }
-
-  extractTimestamps() {
-    const timestampRegex = /\[([\d-T:.Z]+)\]\s+(\w+):/g;
-    let match;
-    
-    while ((match = timestampRegex.exec(this.logText)) !== null) {
-      this.parsed.timestamps.push({
-        time: match[1],
-        event: match[2]
-      });
-    }
-  }
-
-  unescapeText(text) {
-    if (!text) return '';
-    
-    return text
-      .replace(/\\n/g, '\n')
-      .replace(/\\"/g, '"')
-      .replace(/\\t/g, '\t')
-      .replace(/\\r/g, '\r')
-      .replace(/\\\//g, '/')
-      .replace(/\\b/g, '\b')
-      .replace(/\\f/g, '\f')
-      .replace(/\\u([0-9a-fA-F]{4})/g, (match, hex) => String.fromCharCode(parseInt(hex, 16)))
-      .replace(/\\\\/g, '\\');
-  }
-
-  formatOutput() {
-    let output = '';
-    
-    output += '='.repeat(80) + '\n';
-    output += 'CLAUDE STREAM LOG ANALYSIS\n';
-    output += '='.repeat(80) + '\n\n';
-    
-    output += '📋 METADATA:\n' + '-'.repeat(80) + '\n';
-    for (const [key, value] of Object.entries(this.parsed.metadata)) {
-      output += `${key}: ${value}\n`;
-    }
-    output += '\n';
-    
-    if (Object.keys(this.parsed.usage).length > 0) {
-      output += '📊 TOKEN USAGE:\n' + '-'.repeat(80) + '\n';
-      for (const [key, value] of Object.entries(this.parsed.usage)) {
-        output += `${key}: ${value}\n`;
+  
+  // Add tool usage if present
+  if (parsedData.toolUses && parsedData.toolUses.length > 0) {
+    lines.push('\n\n---\n### 🔧 Tools Used:\n');
+    parsedData.toolUses.forEach((tool, idx) => {
+      lines.push(`**${idx + 1}. ${tool.name}**`);
+      if (tool.input) {
+        if (typeof tool.input === 'object') {
+          Object.entries(tool.input).forEach(([key, value]) => {
+            lines.push(`   - ${key}: ${JSON.stringify(value)}`);
+          });
+        } else {
+          lines.push(`   - Input: ${tool.input}`);
+        }
       }
-      output += '\n';
-    }
-    
-    if (this.parsed.thinking.length > 0) {
-      output += '🤔 THINKING PROCESS:\n' + '-'.repeat(80) + '\n';
-      this.parsed.thinking.forEach((thought, idx) => {
-        output += `[Thinking Block ${idx + 1}]\n${thought}\n\n`;
-      });
-    }
-    
-    output += '💬 ASSISTANT RESPONSE:\n' + '-'.repeat(80) + '\n';
-    output += this.parsed.response + '\n\n';
-    
-    if (this.parsed.links.length > 0) {
-      output += '🔗 LINKS FOUND:\n' + '-'.repeat(80) + '\n';
-      this.parsed.links.forEach((link, idx) => {
-        output += `[${idx + 1}] ${link.url}\n`;
-      });
-      output += '\n';
-    }
-    
-    output += '📈 STATISTICS:\n' + '-'.repeat(80) + '\n';
-    output += `Response Length: ${this.parsed.response.length} characters\n`;
-    output += `Word Count: ${this.parsed.response.split(/\s+/).filter(w => w).length}\n`;
-    output += `Stream Fragments: ${this.parsed.fragments.length}\n`;
-    output += `Links Found: ${this.parsed.links.length}\n`;
-    output += `Events: ${this.parsed.timestamps.length}\n`;
-    
-    output += '\n' + '='.repeat(80) + '\n';
-    
-    return output;
+    });
   }
-}
-
-// ============================================================================
-// USAGE EXAMPLES
-// ============================================================================
-
-// Example 1: Real-time streaming
-function exampleRealTimeStream() {
-  console.log('\n🔄 REAL-TIME STREAMING EXAMPLE\n');
   
-  const handler = new ClaudeStreamHandler({
-    onMetadata: (metadata) => {
-      console.log('📋 Metadata received:', metadata);
-    },
-    onThinking: (thinkingDelta, fullThinking) => {
-      console.log('🤔 Thinking delta:', thinkingDelta);
-    },
-    onTextDelta: (textDelta, fullResponse) => {
-      console.log('💬 Text delta:', textDelta);
-    },
-    onComplete: (finalState) => {
-      console.log('\n✅ Stream Complete!');
-      console.log('Final response:', finalState.response);
-      console.log('Links found:', finalState.links);
-      console.log('Usage:', finalState.usage);
-    },
-    onError: (error) => {
-      console.error('❌ Error:', error);
-    }
-  });
-
-  // Read test file
-  try {
-    const logContent = fs.readFileSync('logs/tool_stream_79719d0b-f975-4f22-9c3d-c715811d8bc5.log', 'utf-8');
-    handler.processChunk(logContent);
-  } catch (error) {
-    console.error('Error reading file:', error.message);
-    
-    // Fallback to example data
-    const streamChunks = [
-      '[2025-10-03T18:20:53.747Z] session_init:\n',
-      '{\n',
-      '  "session_id": "test-123",\n',
-      '  "model": "claude-sonnet-4-5-20250929"\n',
-      '}\n',
-      '\n',
-      '[2025-10-03T18:20:57.434Z] stream_event:\n',
-      '{\n',
-      '  "type": "content_block_delta",\n',
-      '  "delta": {\n',
-      '    "type": "text_delta",\n',
-      '    "text": "Hello "\n',
-      '  }\n',
-      '}\n',
-      '\n',
-      '[2025-10-03T18:20:57.500Z] stream_event:\n',
-      '{\n',
-      '  "type": "content_block_delta",\n',
-      '  "delta": {\n',
-      '    "type": "text_delta",\n',
-      '    "text": "world!"\n',
-      '  }\n',
-      '}\n'
-    ];
-    
-    streamChunks.forEach(chunk => handler.processChunk(chunk));
-  }
+  return lines.join('\n');
 }
 
-// Example 2: Post-processing complete log
-function examplePostProcessing(logText) {
-  console.log('\n📊 POST-PROCESSING EXAMPLE\n');
-  
-  const parser = new ClaudeStreamParser(logText);
-  const result = parser.parse();
-  
-  console.log(parser.formatOutput());
-  
-  return result;
-}
-
-// Example 3: Load and process file
-function processLogFile(filename) {
-  try {
-    const logContent = fs.readFileSync(filename, 'utf-8');
-    return examplePostProcessing(logContent);
-  } catch (error) {
-    console.error('Error reading file:', error.message);
-    return null;
-  }
-}
-
-// Run examples
-console.log('═'.repeat(80));
-console.log('CLAUDE STREAM PARSER DEMO');
-console.log('═'.repeat(80));
-
-// Test with real-time handler
-exampleRealTimeStream();
-
-// Test with post-processor if file exists
-try {
-  if (fs.existsSync('logs/tool_stream_79719d0b-f975-4f22-9c3d-c715811d8bc5.log')) {
-    console.log('\n\n');
-    processLogFile('logs/tool_stream_79719d0b-f975-4f22-9c3d-c715811d8bc5.log');
-  }
-} catch (e) {
-  // File doesn't exist, skip
-}
-
-// Export
+// Export everything
 export {
-  ClaudeStreamHandler,
-  ClaudeStreamParser,
-  exampleRealTimeStream,
-  examplePostProcessing,
-  processLogFile
+  FrontendStreamParser,
+  parseCompleteLog,
+  formatResults
 };
+
+// Test the parser with a log file
+import fs from 'fs';
+import path from 'path';
+
+async function testParser() {
+  console.log('🧪 Testing Frontend Stream Parser\n');
+  console.log('='.repeat(80));
+  
+  const logFilePath = '/Users/aishwarya/icproject/logs/tool_stream_34954b63-76e0-45a3-8717-2a60db5ad0ff.log';
+  
+  try {
+    // Read the log file
+    console.log(`\n📁 Reading log file: ${path.basename(logFilePath)}\n`);
+    const logContent = fs.readFileSync(logFilePath, 'utf-8');
+    
+    console.log(`✅ File loaded (${logContent.length} characters)\n`);
+    console.log('='.repeat(80));
+    
+    // Parse the log
+    console.log('\n🔄 Parsing log file...\n');
+    const parsedData = parseCompleteLog(logContent);
+    
+    // Display results
+    console.log('\n📊 PARSING RESULTS:\n');
+    console.log('='.repeat(80));
+    
+    console.log('\n📝 Metadata:');
+    console.log(`   Session ID: ${parsedData.metadata.sessionId}`);
+    console.log(`   Message ID: ${parsedData.metadata.messageId}`);
+    console.log(`   Model: ${parsedData.metadata.model}`);
+    
+    console.log('\n📈 Statistics:');
+    console.log(`   Text Length: ${parsedData.stats.textLength} chars`);
+    console.log(`   Word Count: ${parsedData.stats.wordCount} words`);
+    console.log(`   Thinking Length: ${parsedData.stats.thinkingLength} chars`);
+    console.log(`   Tools Used: ${parsedData.stats.toolCount}`);
+    console.log(`   Total Events: ${parsedData.stats.totalEvents}`);
+    
+    console.log('\n💭 Token Usage:');
+    console.log(`   Input Tokens: ${parsedData.usage.inputTokens}`);
+    console.log(`   Output Tokens: ${parsedData.usage.outputTokens}`);
+    console.log(`   Cache Read Tokens: ${parsedData.usage.cacheReadTokens || 0}`);
+    console.log(`   Total Tokens: ${parsedData.usage.totalTokens}`);
+    
+    if (parsedData.toolUses.length > 0) {
+      console.log('\n🔧 Tools Used:');
+      parsedData.toolUses.forEach((tool, idx) => {
+        console.log(`\n   ${idx + 1}. ${tool.name} (ID: ${tool.id})`);
+        if (tool.input) {
+          console.log(`      Input: ${JSON.stringify(tool.input, null, 2).split('\n').join('\n      ')}`);
+        }
+      });
+    }
+    
+    if (parsedData.toolActivity && parsedData.toolActivity.length > 0) {
+      console.log('\n🔧 Complete Tool Activity Log:');
+      parsedData.toolActivity.forEach((activity) => {
+        console.log(`   ${activity}`);
+      });
+    }
+
+    if (parsedData.webSearchActivity && parsedData.webSearchActivity.length > 0) {
+      console.log('\n🌐 Web Search Activity Log (Legacy):');
+      parsedData.webSearchActivity.forEach((activity) => {
+        console.log(`   ${activity}`);
+      });
+    }
+
+    if (parsedData.tables.length > 0) {
+      console.log('\n📋 Tables Detected:');
+      parsedData.tables.forEach((table, idx) => {
+        console.log(`\n   Table ${idx + 1}:`);
+        console.log(`   - Headers: ${table.headers.join(', ')}`);
+        console.log(`   - Rows: ${table.rowCount}`);
+        console.log(`   - Columns: ${table.columnCount}`);
+      });
+    }
+    
+    console.log('\n' + '='.repeat(80));
+    console.log('\n📄 FORMATTED OUTPUT:\n');
+    console.log('='.repeat(80));
+    console.log(parsedData.formattedOutput);
+    console.log('='.repeat(80));
+    
+    console.log('\n✅ Test completed successfully!\n');
+    
+  } catch (error) {
+    console.error('\n❌ Error during testing:', error.message);
+    console.error(error.stack);
+  }
+}
+
+// Run the test
+testParser();
+

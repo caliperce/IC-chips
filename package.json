@@ -15,8 +15,11 @@
     "@aws-sdk/client-s3": "^3.901.0",
     "@aws-sdk/s3-request-presigner": "^3.901.0",
     "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "firebase": "^12.3.0",
+    "form-data": "^4.0.4",
+    "multer": "^2.0.2",
     "ts-node": "^10.9.2",
     "tsx": "^4.20.6"
   }

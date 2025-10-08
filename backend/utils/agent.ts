@@ -111,6 +111,7 @@ export async function run(
       maxTurns,
       allowedTools,
       permissionMode: "bypassPermissions",
+      ...(appendSystemPrompt ? { systemPrompt: appendSystemPrompt } : {}),
    
       canUseTool: canUseTool || defaultCanUseTool,
       hooks: showToolCalls ? {

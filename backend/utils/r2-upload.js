@@ -1,5 +1,23 @@
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// Get __dirname equivalent in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load environment variables from backend/.env
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
+console.log('=🔧 R2 Configuration:', {
+  endpoint: process.env.R2_ENDPOINT,
+  bucketName: process.env.R2_BUCKET_NAME,
+  publicUrl: process.env.R2_PUBLIC_URL,
+  hasAccessKey: !!process.env.R2_ACCESS_KEY_ID,
+  hasSecretKey: !!process.env.R2_SECRET_ACCESS_KEY
+});
 
 // Initialize S3 client for Cloudflare R2
 const s3Client = new S3Client({
@@ -16,13 +34,18 @@ const s3Client = new S3Client({
  * Generate a pre-signed URL for uploading a file to R2
  * @param {string} filename - Original filename
  * @param {string} contentType - MIME type of the file
+ * @param {string} sessionId - Session ID to organize files by session
  * @returns {Promise<{uploadUrl: string, publicUrl: string, key: string}>}
  */
-async function generateUploadUrl(filename, contentType) {
+async function generateUploadUrl(filename, contentType, sessionId) {
   try {
     const bucketName = process.env.R2_BUCKET_NAME;
     if (!bucketName) {
       throw new Error('R2_BUCKET_NAME is not set in environment variables');
+    }
+
+    if (!sessionId) {
+      throw new Error('sessionId is required for generating upload URL');
     }
 
     // Sanitize the filename to create a safe key
@@ -33,8 +56,9 @@ async function generateUploadUrl(filename, contentType) {
       .replace(/-+/g, '-');
     const finalFilename = `${sanitizedFilenameBase}.${fileExtension}`;
 
-    // Create a unique key for the file in the bucket (use ic-chips folder)
-    const key = `ic-chips/${Date.now()}-${finalFilename}`;
+    // Create a unique key for the file in the bucket (organized by session)
+    // Format: ic-chips/[sessionId]/[timestamp]-[filename]
+    const key = `ic-chips/${sessionId}/${Date.now()}-${finalFilename}`;
 
     const command = new PutObjectCommand({
       Bucket: bucketName,
@@ -60,13 +84,18 @@ async function generateUploadUrl(filename, contentType) {
  * @param {Buffer} fileBuffer - File data as buffer
  * @param {string} filename - Original filename
  * @param {string} contentType - MIME type of the file
+ * @param {string} sessionId - Session ID to organize files by session
  * @returns {Promise<{publicUrl: string, key: string}>}
  */
-async function uploadFileToR2(fileBuffer, filename, contentType) {
+async function uploadFileToR2(fileBuffer, filename, contentType, sessionId) {
   try {
     const bucketName = process.env.R2_BUCKET_NAME;
     if (!bucketName) {
       throw new Error('R2_BUCKET_NAME is not set in environment variables');
+    }
+
+    if (!sessionId) {
+      throw new Error('sessionId is required for file upload');
     }
 
     // Sanitize the filename to create a safe key
@@ -77,8 +106,9 @@ async function uploadFileToR2(fileBuffer, filename, contentType) {
       .replace(/-+/g, '-');
     const finalFilename = `${sanitizedFilenameBase}.${fileExtension}`;
 
-    // Create a unique key for the file in the bucket (use ic-chips folder)
-    const key = `ic-chips/${Date.now()}-${finalFilename}`;
+    // Create a unique key for the file in the bucket (organized by session)
+    // Format: ic-chips/[sessionId]/[timestamp]-[filename]
+    const key = `${sessionId}/${Date.now()}-${finalFilename}`;
 
     const command = new PutObjectCommand({
       Bucket: bucketName,
@@ -87,19 +117,30 @@ async function uploadFileToR2(fileBuffer, filename, contentType) {
       ContentType: contentType,
     });
 
-    await s3Client.send(command);
+    console.log(`=⬆️  Uploading to R2: bucket=${bucketName}, key=${key}, size=${fileBuffer.length} bytes`);
+
+    const result = await s3Client.send(command);
+
+    console.log(`=✅ R2 upload successful:`, result);
 
     // The public URL of the file after upload
     const publicUrl = `${process.env.R2_PUBLIC_URL}/${key}`;
 
     return { publicUrl, key };
   } catch (error) {
-    console.error('Error uploading file to R2:', error);
+    console.error('=❌ Error uploading file to R2:', error);
+    console.error('=❌ Error details:', {
+      message: error.message,
+      code: error.code,
+      statusCode: error.$metadata?.httpStatusCode,
+      bucket: process.env.R2_BUCKET_NAME,
+      endpoint: process.env.R2_ENDPOINT
+    });
     throw error;
   }
 }
 
-module.exports = {
+export {
   generateUploadUrl,
   uploadFileToR2,
   s3Client,

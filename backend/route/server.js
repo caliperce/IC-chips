@@ -1,5 +1,17 @@
 import express from "express";
 import cors from "cors";
+import multer from "multer";
+import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
+
+// Get __dirname equivalent in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load environment variables from backend/.env
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
 import { db } from "../../firebase-config.js";
 import {
   getDocs,
@@ -14,7 +26,24 @@ import {
   orderBy,
   limit
 } from "firebase/firestore";
-import { run } from "../utils/agent.js";
+import { run } from "../utils/agent.ts";
+import { uploadFileToR2 } from "../utils/r2-upload.js";
+
+// Configure multer for handling file uploads (in-memory storage)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB max file size
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept only image files
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed!'), false);
+    }
+  }
+});
 
 
 // Helper function to auto-generate title from first message
@@ -106,8 +135,8 @@ const corsOptions = {
 
 const app = express();
 app.use(cors(corsOptions));
-app.use(express.json({ limit: '200mb' })); // Increase payload limit for base64 images (chip images can be large)
-app.use(express.urlencoded({ limit: '200mb', extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Health check route
 app.get("/", (req, res) => {
@@ -149,27 +178,26 @@ async function processClaudeRequest(sessionId, messageId, userQuery, attachments
     const UPDATE_THROTTLE_MS = 2000;
     let pendingUpdate = false;
 
-    // Convert image URLs to base64 and update Firestore
+    // Pass R2 image URLs directly to Claude (no need to convert to base64)
     const processedAttachments = [];
+    console.log(`=📦 Processing ${attachments.length} attachments...`);
+
     if (attachments && attachments.length > 0) {
       for (const att of attachments) {
         if (att.url) {
-          console.log("Converting image to base64:", att.url);
-          const imageData = await imageUrlToBase64(att.url);
-          if (imageData) {
-            processedAttachments.push({
-              url: att.url,
-              base64: imageData.base64,
-              mediaType: imageData.mediaType,
-              type: att.type || "image",
-              filename: att.filename || att.url.split('/').pop()
-            });
-          }
+          console.log("=🔗 Adding image URL for Claude:", att.url);
+          processedAttachments.push({
+            url: att.url,
+            type: att.type || "image",
+            filename: att.filename || att.url.split('/').pop(),
+            contentType: att.contentType || "image/jpeg"
+          });
         }
       }
 
-      // Update Firestore with base64 attachments
+      // Update Firestore with attachments
       if (processedAttachments.length > 0) {
+        console.log(`=💾 Updating Firestore with ${processedAttachments.length} image URLs`);
         await updateDoc(doc(db, "messages", messageId), {
           attachments: processedAttachments,
           updatedAt: serverTimestamp()
@@ -177,40 +205,28 @@ async function processClaudeRequest(sessionId, messageId, userQuery, attachments
       }
     }
 
-    // Format message with attachments - pass base64 images to agent
-    // If this is an IC chip scan request (has images but minimal/auto query), use the IC scanning system prompt
-    const isICChipScan = processedAttachments.length > 0 && (
-      !userQuery ||
-      userQuery.trim().toLowerCase() === 'scan' ||
-      userQuery.trim().toLowerCase().startsWith('scan ic') ||
-      userQuery.includes('[IC_CHIP_SCAN]')
-    );
+    console.log(`=📸 Total image URLs to send to Claude: ${processedAttachments.length}`);
 
-    let messageWithAttachments = userQuery;
-    let systemPromptAddition = "";
+    // Prepare message and system prompt
+    let messageWithAttachments = userQuery || 'scan';
+    let systemPrompt = "";
 
-    if (isICChipScan) {
-      // Replace generic query with IC chip scanning instructions
-      messageWithAttachments = `Analyze the IC chip image(s) and perform top marking verification according to the following procedure:
+    // ANY image upload is treated as an IC chip scan request
+    if (processedAttachments.length > 0) {
+      console.log("=🔍 IC Chip scan mode activated (images detected)");
 
-1. **Extract Text & Logo**: Read all visible text and logos from the chip's top surface
-2. **Identify Brand/MPN**: Determine the manufacturer and part number
-3. **Retrieve OEM Datasheet**: Search for and fetch the official datasheet marking specification from the OEM website (ti.com, onsemi.com, winbond.com, microchip.com, st.com, etc.)
-4. **Compare & Verify**: Match the observed markings against the datasheet specifications
-5. **Generate Verdict**: Provide one of: PASS / FAIL / REVIEW / INDETERMINATE with detailed reasoning
+      // Set IC chip verification system prompt (from CLAUDE.md spec)
+      systemPrompt = `There will be a Chip Image presented to you. You need to analyze the chip image and perform top marking verification. and provide the right datasheets for reference that you used for the verification`;
 
-Images to analyze:`;
-
+      // Simple user message for IC scans
+      messageWithAttachments = `Analyze the following IC chip image(s) and perform top marking verification and provide the right datasheets for reference that you used for the verification:\n\n`;
       processedAttachments.forEach(att => {
-        messageWithAttachments += `\n- ${att.filename}`;
+        messageWithAttachments += `Image: ${att.filename}\n`;
       });
 
-      systemPromptAddition = `You are an expert IC chip verification agent. Your task is to analyze IC chip top markings and verify their authenticity against OEM datasheets. Always provide citations to the exact datasheet pages used.`;
-    } else if (processedAttachments.length > 0) {
-      messageWithAttachments += "\n\nImages:\n";
-      processedAttachments.forEach(att => {
-        messageWithAttachments += `[Image: ${att.filename}]\n`;
-      });
+      if (userQuery && userQuery.trim() && userQuery.trim().toLowerCase() !== 'scan') {
+        messageWithAttachments += `\nAdditional context: ${userQuery}`;
+      }
     }
 
     // Call Claude Agent SDK with streaming callbacks
@@ -223,6 +239,7 @@ Images to analyze:`;
       enableToolStreamLogging: true,
       toolStreamLogDir: "./logs",
       images: processedAttachments,
+      appendSystemPrompt: systemPrompt,  // Pass the system prompt!
 
       // Stream tool log to Firestore assistantStreaming field
       onToolStreamUpdate: async (toolStreamLog) => {
@@ -304,10 +321,11 @@ Images to analyze:`;
   }
 }
 
-// POST /chat - Create new session and first message
-app.post("/chat", async (req, res) => {
+// POST /chat - Create new session and first message (with optional image uploads)
+app.post("/chat", upload.array('images', 10), async (req, res) => {
   try {
-    const { userQuery, attachments = [] } = req.body;
+    const { userQuery } = req.body;
+    let attachments = [];
 
     if (!userQuery) {
       return res.status(400).json({ error: "userQuery is required" });
@@ -315,9 +333,8 @@ app.post("/chat", async (req, res) => {
 
     console.log("=� Creating new chat session...");
     console.log("=� User query:", userQuery.slice(0, 100));
-    console.log("=� Attachments:", attachments.length);
 
-    // 1. Create the session document
+    // 1. Create the session document first to get sessionId
     const sessionRef = await addDoc(collection(db, "sessions"), {
       title: autoNameFromPrompt(userQuery),
       createdAt: serverTimestamp(),
@@ -331,7 +348,41 @@ app.post("/chat", async (req, res) => {
       },
     });
 
-    // 2. Create the message document
+    const sessionId = sessionRef.id;
+    console.log("=✅ Session created with ID:", sessionId);
+
+    // 2. Upload images to R2 if provided
+    if (req.files && req.files.length > 0) {
+      console.log(`=📦 Uploading ${req.files.length} images to R2...`);
+
+      for (const file of req.files) {
+        try {
+          const result = await uploadFileToR2(
+            file.buffer,
+            file.originalname,
+            file.mimetype,
+            sessionId
+          );
+
+          attachments.push({
+            url: result.publicUrl,
+            type: "image",
+            filename: file.originalname,
+            size: file.size,
+            contentType: file.mimetype,
+            key: result.key
+          });
+
+          console.log(`=✅ Uploaded ${file.originalname} to R2`);
+        } catch (error) {
+          console.error(`=❌ Failed to upload ${file.originalname}:`, error.message);
+        }
+      }
+    }
+
+    console.log("=📝 Attachments:", attachments.length);
+
+    // 3. Create the message document
     const messageRef = await addDoc(collection(db, "messages"), {
       sessionId: sessionRef.id,
       ownerUid: "anonymous",
