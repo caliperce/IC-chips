@@ -1,7 +1,8 @@
 'use client';
 
-import { ICChipScanInterface } from '@/components/ICChipScanInterface';
+import { ChipAuthenticator } from '@/components/ChipAuthenticator';
+// import { ICChipScanInterface } from '@/components/ICChipScanInterface'; // Keep as reference
 
 export default function Home() {
-  return <ICChipScanInterface />;
+  return <ChipAuthenticator />;
 }
