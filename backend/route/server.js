@@ -215,11 +215,53 @@ async function processClaudeRequest(sessionId, messageId, userQuery, attachments
     if (processedAttachments.length > 0) {
       console.log("=🔍 IC Chip scan mode activated (images detected)");
 
-      // Set IC chip verification system prompt (from CLAUDE.md spec)
-      systemPrompt = `There will be a Chip Image presented to you. You need to analyze the chip image and perform top marking verification. and provide the right datasheets for reference that you used for the verification`;
+      // Load CLAUDE.md instructions
+      try {
+        const fs = await import('fs/promises');
+        const claudeMdPath = path.resolve(__dirname, '../../CLAUDE.md');
+        const claudeInstructions = await fs.readFile(claudeMdPath, 'utf-8');
+
+        // Set system prompt with CLAUDE.md + critical output format reminder
+        systemPrompt = `${claudeInstructions}
+
+---
+
+## 🚨 CRITICAL FINAL REMINDER 🚨
+
+After you complete your analysis (search datasheets, verify markings, etc.), you MUST output ONLY this format:
+
+Verdict: [Authentic/Counterfeit/Review Required/Indeterminate]
+
+[Single sentence explanation - max 25 words]
+
+Citations:
+• [URL 1]
+• [URL 2]
+
+DO NOT output section headers, tables, bullet lists (except citations), or detailed analysis.
+Maximum 100 words total.`;
+
+        console.log("✅ Loaded CLAUDE.md instructions (length:", claudeInstructions.length, "chars)");
+      } catch (error) {
+        console.error("⚠️ Failed to load CLAUDE.md:", error.message);
+        // Fallback to basic instructions
+        systemPrompt = `You are an IC chip authentication expert. Analyze chip images and verify top markings against official datasheets.
+
+CRITICAL: Your output MUST be in this format ONLY:
+
+Verdict: [Authentic/Counterfeit/Review Required/Indeterminate]
+
+[Single sentence explanation - max 25 words]
+
+Citations:
+• [URL 1]
+• [URL 2]
+
+DO NOT include section headers, tables, or detailed analysis. Maximum 100 words total.`;
+      }
 
       // Simple user message for IC scans
-      messageWithAttachments = `Analyze the following IC chip image(s) and perform top marking verification and provide the right datasheets for reference that you used for the verification:\n\n`;
+      messageWithAttachments = `Analyze this IC chip image and verify its authenticity:\n\n`;
       processedAttachments.forEach(att => {
         messageWithAttachments += `Image: ${att.filename}\n`;
       });

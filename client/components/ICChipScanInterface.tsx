@@ -2,7 +2,7 @@
 
 import React, { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { AlertCircleIcon, ImageIcon, UploadIcon, XIcon, ChevronDown, ScanIcon, Loader2, PanelLeftOpen, CheckCircle } from 'lucide-react';
+import { AlertCircleIcon, ImageIcon, UploadIcon, XIcon, ChevronDown, ScanIcon, Loader2, PanelLeftOpen, CheckCircle, Globe } from 'lucide-react';
 import { useFileUpload } from '@/hooks/use-file-upload';
 import { Button } from './ui/button';
 import { Card, CardContent } from './ui/card';
@@ -12,6 +12,12 @@ import { onSnapshot, doc } from 'firebase/firestore';
 import { FrontendStreamParser, parseCompleteLog, formatResults } from '../utils/stream-parser';
 import { SessionSidebar } from './SessionSidebar';
 import { getSession } from '@/utils/api';
+
+interface VerdictData {
+  isAuthentic: string | null; // 'Authentic' | 'Counterfeit' | 'Review Required' | 'Indeterminate'
+  reason: string;
+  citations: string[];
+}
 
 interface ScanResult {
   id: string;
@@ -24,6 +30,7 @@ interface ScanResult {
   error?: string;
   toolsUsed?: Array<{ id: string; name: string }>;
   toolActivity?: string[]; // Array of tool activity log entries
+  verdictData?: VerdictData | null; // Parsed verdict data
 }
 
 export function ICChipScanInterface() {
@@ -144,18 +151,39 @@ export function ICChipScanInterface() {
           lastProcessedLength = rawStream.length;
           const state = parser.getState();
 
+          // Debug logging
+          console.log('[Parser State]', {
+            assistantTextLength: state.assistantText?.length || 0,
+            toolActivityCount: state.toolActivity?.length || 0,
+            toolUsesCount: state.toolUses?.length || 0,
+            thinkingLength: state.thinking?.length || 0
+          });
+
+          // Build a meaningful thinking summary from tool activity
+          let thinkingSummary = '';
+          if (state.toolActivity && state.toolActivity.length > 0) {
+            thinkingSummary = state.toolActivity.join('\n');
+          } else if (state.thinking) {
+            thinkingSummary = state.thinking;
+          } else if (state.assistantText) {
+            thinkingSummary = 'Agent is generating response...';
+          } else {
+            thinkingSummary = 'Processing...';
+          }
+
           setScanResults(prev =>
             prev.map(result =>
               result.id === messageId
                 ? {
                     ...result,
                     status: messageData.status || 'processing',
-                    agentThinking: state.thinking || result.agentThinking || 'Processing...',
+                    agentThinking: thinkingSummary,
                     assistantText: state.assistantText,
                     finalAnswer: messageData.assistantResponse,
                     error: messageData.error?.message,
                     toolsUsed: state.toolUses,
                     toolActivity: state.toolActivity, // Add tool activity tracking
+                    verdictData: state.verdictData, // Add parsed verdict data
                   }
                 : result
             )
@@ -224,14 +252,29 @@ export function ICChipScanInterface() {
     return Array.from(new Set(foundUrls));
   };
 
-  const renderScanResult = (result: ScanResult) => {
+  const renderScanResult = (result: ScanResult, uploadedImages?: Array<{ preview?: string }>) => {
     const isExpanded = expandedThinking === result.id;
+
+    // Helper function to extract final answer without diagnostics
+    const getFinalAnswer = (text: string | undefined) => {
+      if (!text) return '';
+      const diagnosticsIndex = text.indexOf('=== Diagnostics ===');
+      if (diagnosticsIndex !== -1) {
+        return text.substring(0, diagnosticsIndex).trim();
+      }
+      return text;
+    };
+
+    // Determine what to show in the answer section
+    const finalAnswerText = result.status === 'done'
+      ? getFinalAnswer(result.finalAnswer || result.assistantText)
+      : '';
 
     return (
       <div key={result.id} className="mb-6">
         <Card>
           <CardContent className="p-6">
-            {result.agentThinking && (
+            {(result.agentThinking || result.toolActivity || result.assistantText) && (
               <div className="mb-4">
                 <Button
                   variant="outline"
@@ -256,19 +299,17 @@ export function ICChipScanInterface() {
                       transition={{ duration: 0.3, ease: 'easeInOut' }}
                       className="mt-3"
                     >
-                      <div className="rounded-md p-4 max-h-80 overflow-y-auto bg-muted/30 border">
-                        <pre className="text-xs whitespace-pre-wrap font-mono leading-relaxed text-foreground/80">
-                          {result.agentThinking}
-                          {result.status === 'processing' && (
-                            <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 rounded-sm"></span>
-                          )}
-                        </pre>
-                        
-                        {/* Tool Activity inside thinking dropdown */}
+                      <div className="rounded-md p-4 max-h-96 overflow-y-auto bg-muted/30 border">
+                        {/* Tool Activity with Web Search Icon */}
                         {result.toolActivity && result.toolActivity.length > 0 && (
-                          <div className="mt-4 pt-4 border-t border-border/50">
+                          <div className="mb-4">
                             <h4 className="text-xs font-semibold mb-2 text-foreground/90 flex items-center gap-2">
-                              🔧 Tool Activity
+                              {result.status === 'processing' ? (
+                                <Globe className="h-4 w-4 text-blue-500 animate-pulse" />
+                              ) : (
+                                <Globe className="h-4 w-4 text-blue-500" />
+                              )}
+                              Web Search & Tool Activity
                               {result.status === 'processing' && <Loader2 className="h-3 w-3 animate-spin" />}
                             </h4>
                             <div className="rounded-md p-3 bg-black/10 dark:bg-black/30">
@@ -281,6 +322,24 @@ export function ICChipScanInterface() {
                             </div>
                           </div>
                         )}
+
+                        {/* Assistant Streaming Text (Thinking) */}
+                        {result.assistantText && (
+                          <div>
+                            <h4 className="text-xs font-semibold mb-2 text-foreground/90 flex items-center gap-2">
+                              💭 Agent Thinking
+                              {result.status === 'processing' && <Loader2 className="h-3 w-3 animate-spin" />}
+                            </h4>
+                            <div className="rounded-md p-3 bg-black/10 dark:bg-black/30">
+                              <div className="text-xs leading-relaxed text-foreground/70 whitespace-pre-wrap">
+                                {result.assistantText}
+                                {result.status === 'processing' && (
+                                  <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 rounded-sm"></span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </motion.div>
                   )}
@@ -288,30 +347,115 @@ export function ICChipScanInterface() {
               </div>
             )}
 
-            {result.finalAnswer && result.status === 'done' && (
+            {/* Show verdict card when done */}
+            {result.status === 'done' && result.verdictData && (
               <div className="mt-4">
-                <div className="prose prose-sm max-w-none">
-                  <p className="text-foreground whitespace-pre-wrap">{result.finalAnswer}</p>
+                <div className="rounded-lg border p-6 bg-card">
+                  {/* Images preview (if we have uploaded images) */}
+                  {uploadedImages && uploadedImages.length > 0 && (
+                    <div className="mb-6 grid grid-cols-2 gap-4 max-w-2xl mx-auto">
+                      {uploadedImages.slice(0, 2).map((file, idx) => (
+                        file.preview && (
+                          <div key={idx} className="relative">
+                            <div className="aspect-video rounded-lg overflow-hidden border-2 border-muted">
+                              <img
+                                src={file.preview}
+                                alt={idx === 0 ? "Original Image" : "Analyzed Image"}
+                                className="w-full h-full object-contain bg-muted/30"
+                              />
+                            </div>
+                            <p className="text-xs text-muted-foreground text-center mt-2">
+                              {idx === 0 ? "Original Image" : "Analyzed Image"}
+                            </p>
+                          </div>
+                        )
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Title */}
+                  <h3 className="text-lg font-semibold mb-4 text-foreground">Authentication</h3>
+
+                  <h4 className="text-sm font-medium text-foreground/70 mb-2">Verdict</h4>
+
+                  {/* Verdict Badge */}
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className={`inline-flex items-center gap-2 px-4 py-2 rounded-md font-semibold text-sm ${
+                      result.verdictData.isAuthentic === 'Authentic'
+                        ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
+                        : result.verdictData.isAuthentic === 'Counterfeit'
+                        ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
+                        : result.verdictData.isAuthentic === 'Review Required'
+                        ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400'
+                        : 'bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400'
+                    }`}>
+                      {result.verdictData.isAuthentic === 'Authentic' && '✓'}
+                      {result.verdictData.isAuthentic === 'Counterfeit' && '✕'}
+                      {result.verdictData.isAuthentic === 'Review Required' && '⚠'}
+                      {result.verdictData.isAuthentic === 'Indeterminate' && '?'}
+                      <span>{result.verdictData.isAuthentic || 'Unknown'}</span>
+                    </div>
+                  </div>
+
+                  {/* Reason */}
+                  {result.verdictData.reason && (
+                    <div className="mb-4 p-3 bg-muted/20 rounded-md">
+                      <p className="text-sm text-foreground/80 leading-relaxed">
+                        {result.verdictData.reason}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Citations */}
+                  {result.verdictData.citations && result.verdictData.citations.length > 0 && (
+                    <div className="mt-4 p-3 bg-muted/30 rounded-md border">
+                      <h4 className="text-sm font-semibold mb-2 text-foreground">Citations</h4>
+                      <div className="flex flex-col gap-2">
+                        {result.verdictData.citations.map((citation, idx) => (
+                          <a
+                            key={idx}
+                            href={citation}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-blue-600 hover:text-blue-800 hover:underline break-all flex items-start gap-2"
+                          >
+                            <span className="text-blue-400 shrink-0">•</span>
+                            <span>{citation}</span>
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
 
-            {result.citations && result.citations.length > 0 && (
-              <div className="mt-4 p-3 bg-muted/30 rounded-md border">
-                <h4 className="text-sm font-semibold mb-2 text-foreground">Citations</h4>
-                <div className="flex flex-col gap-1">
-                  {result.citations.map((citation, idx) => (
-                    <a
-                      key={idx}
-                      href={citation}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-blue-600 hover:text-blue-800 hover:underline break-all"
-                    >
-                      {citation}
-                    </a>
-                  ))}
+            {/* Fallback: Show final answer when done but no verdict data parsed */}
+            {finalAnswerText && result.status === 'done' && !result.verdictData && (
+              <div className="mt-4">
+                <div className="prose prose-sm max-w-none">
+                  <div className="text-foreground whitespace-pre-wrap">{finalAnswerText}</div>
                 </div>
+
+                {/* Show citations if they exist in fallback mode */}
+                {result.citations && result.citations.length > 0 && (
+                  <div className="mt-4 p-3 bg-muted/30 rounded-md border">
+                    <h4 className="text-sm font-semibold mb-2 text-foreground">Citations</h4>
+                    <div className="flex flex-col gap-1">
+                      {result.citations.map((citation, idx) => (
+                        <a
+                          key={idx}
+                          href={citation}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-blue-600 hover:text-blue-800 hover:underline break-all"
+                        >
+                          {citation}
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -370,7 +514,7 @@ export function ICChipScanInterface() {
             {scanResults.length > 0 && (
               <div className="mb-8">
                 <h2 className="text-lg font-semibold mb-4 text-foreground">Scan Results</h2>
-                {scanResults.map(renderScanResult)}
+                {scanResults.map((result) => renderScanResult(result, files))}
               </div>
             )}
           </div>

@@ -64,72 +64,59 @@ class FrontendStreamParser {
   extractEvents() {
     const events = [];
     const lines = this.buffer.split('\n');
-    
+
     this.buffer = lines.pop() || '';
-    
+
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      
-      // Look for tool_use_from_stream lines - these are special
-      if (trimmed.includes('tool_use_from_stream:')) {
+
+      // Skip timestamp lines like [2025-10-09T05:28:36.655Z]
+      if (trimmed.match(/^\[\d{4}-\d{2}-\d{2}T[\d:.]+Z\]/)) {
         // Process any buffered JSON first
         if (this.jsonBuffer) {
           try {
             const event = JSON.parse(this.jsonBuffer);
             events.push(event);
-          } catch (e) {}
+          } catch (e) {
+            // Invalid JSON, skip
+          }
           this.jsonBuffer = '';
         }
         continue;
       }
 
-      // Look for input_json_delta lines
-      if (trimmed.includes('input_json_delta:')) {
-        // Get the next line which should have the partial data
-        continue;
-      }
-      
-      // Skip timestamp lines
-      if (trimmed.startsWith('[') && trimmed.includes(']')) {
+      // Skip event type labels (session_init:, stream_event:, tool_use_from_stream:, input_json_delta:)
+      if (trimmed.match(/^(session_init|stream_event|tool_use_from_stream|input_json_delta|session_complete):\s*$/)) {
+        // Process any buffered JSON first
         if (this.jsonBuffer) {
           try {
             const event = JSON.parse(this.jsonBuffer);
             events.push(event);
-          } catch (e) {}
+          } catch (e) {
+            // Invalid JSON, skip
+          }
           this.jsonBuffer = '';
         }
         continue;
       }
-      
-      // Skip event type labels
-      if (trimmed.match(/^(session_init|stream_event|tool_use_from_stream):/)) {
-        if (this.jsonBuffer) {
-          try {
-            const event = JSON.parse(this.jsonBuffer);
-            events.push(event);
-          } catch (e) {}
-        }
-        this.jsonBuffer = '';
-        continue;
-      }
-      
+
       // Accumulate JSON lines
       this.jsonBuffer += trimmed;
-      
-      // Try to parse when we might have complete JSON
+
+      // Try to parse when we have complete JSON (ends with } or })
       if (trimmed.endsWith('}') || trimmed.endsWith('},')) {
         try {
-          const cleanJson = this.jsonBuffer.replace(/,$/, '');
+          const cleanJson = this.jsonBuffer.replace(/,\s*$/, ''); // Remove trailing comma
           const event = JSON.parse(cleanJson);
           events.push(event);
           this.jsonBuffer = '';
         } catch (e) {
-          // Not complete yet
+          // Not complete yet, keep accumulating
         }
       }
     }
-    
+
     return events;
   }
 
@@ -420,9 +407,79 @@ class FrontendStreamParser {
       .replace(/\\\\/g, '\\');
   }
 
+  /**
+   * Extract verdict data from the final markdown output
+   */
+  extractVerdictData() {
+    const text = this.state.assistantText;
+    if (!text) return null;
+
+    // Debug: Show first 200 chars of text
+    console.log('[Verdict Extraction DEBUG] First 200 chars of assistantText:', text.substring(0, 200));
+
+    // Match verdict line (Authentic/Counterfeit/Review Required/Indeterminate)
+    const verdictMatch = text.match(/Verdict:\s*(Authentic|Counterfeit|Review Required|Indeterminate)/i);
+
+    // If no verdict found, return null (not ready yet)
+    if (!verdictMatch) {
+      console.log('[Verdict Extraction] No verdict match found in text');
+      return null;
+    }
+
+    // Extract explanation (text between verdict and Citations section)
+    let explanation = '';
+    const verdictIndex = text.indexOf('Verdict:');
+    const citationsIndex = text.indexOf('Citations:');
+    if (verdictIndex !== -1 && citationsIndex !== -1) {
+      explanation = text.substring(verdictIndex, citationsIndex).trim();
+      // Remove the verdict line itself
+      explanation = explanation.replace(/Verdict:\s*(Authentic|Counterfeit|Review Required|Indeterminate)/i, '').trim();
+    } else if (verdictIndex !== -1) {
+      // No citations section yet, grab everything after verdict
+      explanation = text.substring(verdictIndex).trim();
+      explanation = explanation.replace(/Verdict:\s*(Authentic|Counterfeit|Review Required|Indeterminate)/i, '').trim();
+    }
+
+    // Extract citations (URLs after the Citations: marker)
+    const citations = [];
+    if (citationsIndex !== -1) {
+      const citationsSection = text.substring(citationsIndex);
+      const urlRegex = /https?:\/\/[^\s)"\]]+/g;
+      const matches = citationsSection.match(urlRegex);
+      if (matches) {
+        citations.push(...matches);
+      }
+    }
+
+    // If no citations found in Citations section, extract all URLs from text
+    if (citations.length === 0) {
+      const urlRegex = /https?:\/\/[^\s)"\]]+/g;
+      const allUrls = text.match(urlRegex);
+      if (allUrls) {
+        citations.push(...Array.from(new Set(allUrls)));
+      }
+    }
+
+    const result = {
+      isAuthentic: verdictMatch[1],
+      reason: explanation,
+      citations: Array.from(new Set(citations)) // Remove duplicates
+    };
+
+    // Debug logging
+    console.log('[Verdict Extraction]', {
+      foundVerdict: verdictMatch[1],
+      reasonLength: explanation.length,
+      citationCount: result.citations.length
+    });
+
+    return result;
+  }
+
   getState() {
     return {
       ...this.state,
+      verdictData: this.extractVerdictData(),
       stats: {
         textLength: this.state.assistantText.length,
         thinkingLength: this.state.thinking.length,
@@ -585,4 +642,9 @@ export {
   parseCompleteLog,
   formatResults
 };
+
+
+
+
+
 
